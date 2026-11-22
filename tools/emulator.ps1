@@ -46,5 +46,8 @@ Start-Process (Join-Path $sdk 'emulator\emulator.exe') -ArgumentList @('-avd', $
 & $adb wait-for-device
 do { Start-Sleep 2; $b = (& $adb -e shell getprop sys.boot_completed 2>$null) } until ("$b".Trim() -eq '1')
 & $adb -e shell settings put system font_scale 0.85 | Out-Null
+# Head unit: status bar ends at y=58, nav bar starts at y=662 -> content area exactly 1280x604.
+# The emulator's bars are 24 + 48 px, so shrink the usable display by 34 px top / 10 px bottom.
+& $adb -e shell wm overscan 0,34,0,10 | Out-Null
 & $adb -e shell settings put system show_touches 1 | Out-Null
 Write-Host 'Emulator ready. Deploy with:  .\deploy.ps1 -Serial emulator-5554 -Build' -ForegroundColor Green
