@@ -4,9 +4,16 @@ A fast, minimal home screen (launcher) for a **TS18 Android car head unit**
 (Unisoc UIS8581A, Android 10, 1280×720 @ 160 dpi). Plain Java, no libraries, no Gradle,
 no animations, no live widgets — built to stay smooth on a weak chip.
 
-- Left: big clock + date, GPS speed, now-playing card with prev / play-pause / next.
-- Right: 12 large app tiles (long-press a tile to reassign it), last tile = **All apps** drawer.
-- Long-press the clock card → back to the original launcher / choose home app / Android settings.
+The home screen is a "cockpit": what the driver glances at is the hero, apps are one tap away.
+
+- Speed gauge (GPS): large numeral inside a 0–160 km/h arc, redrawn only when the value changes.
+- Clock + date, and a now-playing card with large prev / play-pause / next (tap the card = open the player).
+- Dock of 8 pinned apps + **All apps** drawer.
+  - Long-press an app in the drawer → **Pin to home screen** (pick the slot to replace) / App info.
+  - Long-press a dock app → choose another app for the slot (an app already on home swaps places),
+    or **Remove from home** (the slot goes back to its default).
+- Long-press the gauge or the clock → original launcher / choose home app / Android settings /
+  check for updates / move the gauge to the other side (left- or right-hand drive).
 
 ## Work anywhere, go to the car only to deploy
 

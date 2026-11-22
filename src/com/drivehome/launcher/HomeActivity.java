@@ -2,7 +2,6 @@ package com.drivehome.launcher;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
@@ -15,8 +14,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
-import android.graphics.Color;
-import android.graphics.drawable.ColorDrawable;
+import android.graphics.Bitmap;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -27,16 +25,14 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.format.DateFormat;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.widget.AbsListView;
-import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
+import android.widget.GridView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
-import android.widget.Space;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -48,23 +44,26 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * The home screen. Entire UI is built in code. Left: clock/speed card + media card. Right: 4x3 tile grid
- * (11 app tiles + "All apps"). App drawer is an in-activity overlay.
+ * The home screen ("Cockpit"). Entire UI is built in code. Left: the speed gauge. Right: time/date over
+ * the now-playing card. Bottom: a dock of 8 pinned apps + "All apps". The app drawer is an in-activity
+ * overlay; menus and pickers are {@link Sheet} dialogs.
  */
 public class HomeActivity extends Activity
         implements AppRepository.Listener, DrawerView.Host, MediaCard.Host, Updater.Listener {
     private static final String TAG = "DriveHome";
     private static final String PREFS = "drivehome";
+    /** Slot assignments: "tile_<index>" = flattened component (same storage as the old tile grid). */
     private static final String KEY_TILE = "tile_";
-    private static final int APP_TILES = 11;
-    private static final int ALL_APPS_TILE = 11;
+    /** True = speed gauge on the right edge (driver sits on the right). */
+    private static final String KEY_GAUGE_RIGHT = "gauge_right";
+    private static final int APP_SLOTS = 8;
     private static final long SPEED_STALE_MS = 5000L;
 
     private static final String ORIGINAL_LAUNCHER_PKG = "com.dofun.variety";
     private static final ComponentName ORIGINAL_LAUNCHER =
             new ComponentName(ORIGINAL_LAUNCHER_PKG, "com.dofun.overseasvariety.Launcher");
 
-    /** Never used as default/backfill tiles (still assignable by long-press if installed). */
+    /** Never used as default/backfill slots (still assignable by hand if installed). */
     private static final String[] NEVER_DEFAULT = {
         ORIGINAL_LAUNCHER_PKG,
         "com.waze",
@@ -81,20 +80,19 @@ public class HomeActivity extends Activity
     };
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final AppCellView[] tiles = new AppCellView[APP_TILES + 1];
-    private final AppEntry[] tileEntries = new AppEntry[APP_TILES];
+    private final AppCellView[] tiles = new AppCellView[APP_SLOTS];
+    private final AppEntry[] tileEntries = new AppEntry[APP_SLOTS];
+    /** True where the slot shows an app the user put there (not the slot's default). */
+    private final boolean[] tilePinned = new boolean[APP_SLOTS];
 
     private AppRepository repo;
     private AppRepository.Snapshot snapshot;
     private SharedPreferences prefs;
 
-    private LinearLayout content;
-    private LinearLayout leftColumn;
-    private TileGrid tileGrid;
-    private TextView timeView;
-    private TextView dateView;
-    private TextView speedView;
-    private View speedRow;
+    private HomeLayout home;
+    private TileGrid dock;
+    private SpeedGauge gauge;
+    private ClockView clockView;
     private TextView updateChip;
     private MediaCard mediaCard;
     private DrawerView drawer;
@@ -113,7 +111,7 @@ public class HomeActivity extends Activity
         }
     };
 
-    private final Runnable speedStale = () -> setSpeed("--");
+    private final Runnable speedStale = () -> setSpeed(SpeedGauge.UNKNOWN);
 
     @SuppressWarnings("deprecation")
     private final LocationListener locationListener = new LocationListener() {
@@ -134,7 +132,7 @@ public class HomeActivity extends Activity
         @Override
         public void onProviderDisabled(String provider) {
             handler.removeCallbacks(speedStale);
-            setSpeed("--");
+            setSpeed(SpeedGauge.UNKNOWN);
         }
     };
 
@@ -192,7 +190,7 @@ public class HomeActivity extends Activity
         Updater u = Updater.get(this);
         int ready = u.readyVersion();
         if (ready > u.currentVersion()) {
-            updateChip.setText("Update v" + ready + " ready · tap to install");
+            Ui.setText(updateChip, "Install update v" + ready);
             updateChip.setVisibility(View.VISIBLE);
         } else {
             updateChip.setVisibility(View.GONE);
@@ -252,45 +250,58 @@ public class HomeActivity extends Activity
     }
 
     private View buildUi() {
-        int pad = dp(16);
-        int gap = dp(12);
-
         FrameLayout root = new FrameLayout(this);
         root.setFitsSystemWindows(true);
 
-        content = new LinearLayout(this);
-        content.setPadding(pad, pad, pad, pad);
+        // Information: bare on the window background. Long-press either = system menu.
+        View.OnLongClickListener systemMenu = v -> {
+            showSystemMenu();
+            return true;
+        };
+        gauge = new SpeedGauge(this);
+        gauge.setOnLongClickListener(systemMenu);
+        clockView = new ClockView(this);
+        clockView.setOnLongClickListener(systemMenu);
 
-        leftColumn = new LinearLayout(this);
-        leftColumn.setOrientation(LinearLayout.VERTICAL);
-        leftColumn.addView(buildClockCard(), new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 55f));
+        // Shown only when Updater has a newer, verified APK downloaded. Tap -> Android's install prompt.
+        updateChip = Ui.text(this, dp(Ui.T_BODY), Ui.WHITE, Ui.medium());
+        updateChip.setGravity(Gravity.CENTER);
+        updateChip.setBackground(Ui.pressable(Ui.ACCENT, Ui.ACCENT_PRESSED, dp(Ui.TOUCH / 2f)));
+        updateChip.setPadding(dp(28), 0, dp(28), 0);
+        updateChip.setVisibility(View.GONE);
+        updateChip.setOnClickListener(v -> {
+            // Hide immediately: a double tap must not create two install sessions.
+            // onResume re-syncs it if the install was cancelled or failed.
+            v.setVisibility(View.GONE);
+            toast("Installing update…");
+            Updater.get(this).install();
+        });
+
         mediaCard = new MediaCard(this, this);
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 45f);
-        mlp.topMargin = gap;
-        leftColumn.addView(mediaCard, mlp);
 
-        tileGrid = new TileGrid(this, gap);
-        int radius = dp(Ui.RADIUS);
-        for (int i = 0; i < tiles.length; i++) {
-            AppCellView tile = new AppCellView(this, dp(72), dp(18), Ui.medium(), true);
-            tile.setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, radius));
+        // Dock: one card holding the pinned apps; each cell shows its own pressed plate.
+        dock = new TileGrid(this, 0);
+        dock.setBackground(Ui.card(this));
+        for (int i = 0; i < APP_SLOTS; i++) {
+            AppCellView tile = newSlotCell(Ui.CARD_PRESSED);
             final int index = i;
             tile.setOnClickListener(v -> onTileClick(index));
-            if (i != ALL_APPS_TILE) {
-                tile.setOnLongClickListener(v -> {
-                    showTileChooser(index);
-                    return true;
-                });
-            }
+            tile.setOnLongClickListener(v -> {
+                showTileMenu(index);
+                return true;
+            });
             tiles[i] = tile;
-            tileGrid.addView(tile);
+            dock.addView(tile);
         }
-        tiles[ALL_APPS_TILE].setAllApps("All apps");
 
-        content.addView(leftColumn);
-        content.addView(tileGrid);
-        root.addView(content, new FrameLayout.LayoutParams(
+        AppCellView allApps = new AppCellView(this, dp(64), dp(Ui.T_LABEL), Ui.medium(), false);
+        allApps.setAllApps("All apps");
+        allApps.setBackground(Ui.pressableCard(this));
+        allApps.setOnClickListener(v -> openDrawer());
+
+        home = new HomeLayout(this, gauge, clockView, updateChip, mediaCard, dock, allApps);
+        home.setGaugeRight(prefs.getBoolean(KEY_GAUGE_RIGHT, false));
+        root.addView(home, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         drawer = new DrawerView(this, this);
@@ -300,94 +311,26 @@ public class HomeActivity extends Activity
         return root;
     }
 
-    private View buildClockCard() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(Ui.rounded(Ui.CARD, dp(Ui.RADIUS)));
-        card.setPadding(dp(28), dp(22), dp(28), dp(24));
-        card.setOnLongClickListener(v -> {
-            showSystemMenu();
-            return true;
-        });
-
-        timeView = Ui.text(this, dp(96), Ui.TEXT, Ui.light());
-        timeView.setLetterSpacing(-0.02f);
-        card.addView(timeView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        dateView = Ui.text(this, dp(22), Ui.TEXT2, Ui.regular());
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        dlp.topMargin = dp(8);
-        card.addView(dateView, dlp);
-
-        // Shown only when Updater has a newer, verified APK downloaded. Tap -> Android's install prompt.
-        updateChip = Ui.text(this, dp(17), Ui.WHITE, Ui.medium());
-        updateChip.setBackground(Ui.pressable(Ui.ACCENT, Ui.ACCENT_PRESSED, dp(10)));
-        updateChip.setPadding(dp(14), dp(8), dp(14), dp(8));
-        updateChip.setSingleLine(true);
-        updateChip.setVisibility(View.GONE);
-        updateChip.setOnClickListener(v -> {
-            // Hide immediately: a double tap must not create two install sessions.
-            // onResume re-syncs it if the install was cancelled or failed.
-            v.setVisibility(View.GONE);
-            toast("Installing update…");
-            Updater.get(this).install();
-        });
-        LinearLayout.LayoutParams ulp0 = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        ulp0.topMargin = dp(12);
-        card.addView(updateChip, ulp0);
-
-        card.addView(new Space(this), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setBaselineAligned(true);
-        speedView = Ui.text(this, dp(44), Ui.TEXT, Ui.light());
-        speedView.setText("--");
-        speedView.setSingleLine(true);
-        speedView.setGravity(android.view.Gravity.END);
-        // Fixed width (fits "188"): the 1 Hz speed text changes then only redraw this view
-        // instead of re-laying out the whole window while driving.
-        int speedWidth = (int) Math.ceil(speedView.getPaint().measureText("188")) + dp(2);
-        row.addView(speedView, new LinearLayout.LayoutParams(speedWidth, ViewGroup.LayoutParams.WRAP_CONTENT));
-        TextView unit = Ui.text(this, dp(18), Ui.TEXT2, Ui.regular());
-        unit.setText("km/h");
-        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        ulp.setMarginStart(dp(8));
-        row.addView(unit, ulp);
-        row.setVisibility(View.GONE);
-        speedRow = row;
-        card.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return card;
+    /** A dock-style cell (64dp icon + label) whose pressed plate sits 6dp inside the cell. */
+    private AppCellView newSlotCell(int pressedColor) {
+        AppCellView cell = new AppCellView(this, dp(64), dp(Ui.T_LABEL), Ui.medium(), false);
+        cell.setBackground(Ui.pressablePlate(pressedColor, dp(Ui.RADIUS - 6), dp(6)));
+        return cell;
     }
 
-    /** Landscape (normal): 440px left column + 4x3 grid. Portrait fallback: stacked, 3x4 grid. */
+    /** Landscape (normal): gauge | clock + media over an 8x1 dock. Portrait fallback: stacked, 4x2 dock. */
     private void applyLayoutMode(Configuration c) {
         boolean landscape = c == null || c.screenWidthDp == 0 || c.screenHeightDp == 0
                 || c.screenWidthDp >= c.screenHeightDp;
         int mode = landscape ? 0 : 1;
         if (mode == layoutMode) return;
         layoutMode = mode;
-        int gap = dp(12);
+        home.setPortrait(!landscape);
         if (landscape) {
-            content.setOrientation(LinearLayout.HORIZONTAL);
-            leftColumn.setLayoutParams(new LinearLayout.LayoutParams(dp(440), ViewGroup.LayoutParams.MATCH_PARENT));
-            LinearLayout.LayoutParams g = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
-            g.setMarginStart(gap);
-            tileGrid.setLayoutParams(g);
-            tileGrid.setGrid(4, 3);
+            dock.setGrid(APP_SLOTS, 1);
             drawer.setColumns(8);
         } else {
-            content.setOrientation(LinearLayout.VERTICAL);
-            leftColumn.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 42f));
-            LinearLayout.LayoutParams g = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 58f);
-            g.topMargin = gap;
-            tileGrid.setLayoutParams(g);
-            tileGrid.setGrid(3, 4);
+            dock.setGrid(APP_SLOTS / 2, 2);
             drawer.setColumns(5);
         }
     }
@@ -419,13 +362,14 @@ public class HomeActivity extends Activity
     }
 
     private void updateClock() {
-        if (timeView == null) return;
+        if (clockView == null) return;
         try {
             Date now = new Date();
             Locale loc = Locale.getDefault();
             boolean is24 = DateFormat.is24HourFormat(this);
-            Ui.setText(timeView, new SimpleDateFormat(is24 ? "HH:mm" : "h:mm", loc).format(now));
-            Ui.setText(dateView, new SimpleDateFormat("EEEE, d MMMM", loc).format(now));
+            clockView.set(new SimpleDateFormat(is24 ? "HH:mm" : "h:mm", loc).format(now),
+                    new SimpleDateFormat("EEEE", loc).format(now),
+                    new SimpleDateFormat("d MMMM", loc).format(now));
         } catch (RuntimeException e) {
             Log.w(TAG, "clock", e);
         }
@@ -443,9 +387,13 @@ public class HomeActivity extends Activity
 
     private void startLocation() {
         boolean granted = hasFineLocation();
-        speedRow.setVisibility(granted ? View.VISIBLE : View.GONE);
-        if (!granted || locationActive) return;
-        setSpeed("--");
+        gauge.setAvailable(granted);
+        if (!granted) {
+            setSpeed(SpeedGauge.UNKNOWN);
+            return;
+        }
+        if (locationActive) return;
+        setSpeed(SpeedGauge.UNKNOWN);
         try {
             LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
             if (lm == null) return;
@@ -472,22 +420,17 @@ public class HomeActivity extends Activity
 
     private void onLocation(Location l) {
         if (l == null) return;
-        String s;
-        if (l.hasSpeed()) {
-            s = Integer.toString(Math.max(0, Math.round(l.getSpeed() * 3.6f)));
-        } else {
-            s = "--";
-        }
-        setSpeed(s);
+        setSpeed(l.hasSpeed() ? Math.max(0, Math.round(l.getSpeed() * 3.6f)) : SpeedGauge.UNKNOWN);
         handler.removeCallbacks(speedStale);
         handler.postDelayed(speedStale, SPEED_STALE_MS); // fix lost -> "--"
     }
 
-    private void setSpeed(String s) {
-        if (speedView != null) Ui.setText(speedView, s);
+    /** At most 1 Hz; the gauge ignores unchanged values and never re-lays out. */
+    private void setSpeed(int kmh) {
+        if (gauge != null) gauge.setSpeed(kmh);
     }
 
-    // ------------------------------------------------------------------------------------------ apps & tiles
+    // ------------------------------------------------------------------------------------------ apps & slots
 
     @Override
     public void onAppsChanged(AppRepository.Snapshot s) {
@@ -501,7 +444,7 @@ public class HomeActivity extends Activity
         HashSet<String> set = new HashSet<>();
         for (String[] d : AppRepository.DEFAULT_TILES) set.add(d[0]);
         for (String p : PREFERRED_BACKFILL) set.add(p);
-        for (int i = 0; i < APP_TILES; i++) {
+        for (int i = 0; i < APP_SLOTS; i++) {
             String v = prefs.getString(KEY_TILE + i, null);
             ComponentName cn = v == null ? null : ComponentName.unflattenFromString(v);
             if (cn != null) set.add(cn.getPackageName());
@@ -516,167 +459,323 @@ public class HomeActivity extends Activity
         return false;
     }
 
-    /** Default app per tile slot: the default packages that are installed, then backfill. */
-    private List<AppEntry> computeDefaults(AppRepository.Snapshot s) {
-        ArrayList<AppEntry> out = new ArrayList<>(APP_TILES);
+    /**
+     * Apps for slots the user has not assigned, in order: the default packages that are installed,
+     * then backfill. Entry i is slot i's default; later entries replace defaults that are taken.
+     */
+    private List<AppEntry> defaultCandidates(AppRepository.Snapshot s) {
+        final int max = APP_SLOTS * 3;
+        ArrayList<AppEntry> out = new ArrayList<>(max);
         HashSet<String> usedPkgs = new HashSet<>();
         for (String[] d : AppRepository.DEFAULT_TILES) {
+            if (out.size() >= max) break;
             AppEntry e = s.byPackage.get(d[0]);
             if (e != null && usedPkgs.add(e.packageName)) out.add(e);
         }
         for (String p : PREFERRED_BACKFILL) {
-            if (out.size() >= APP_TILES) break;
+            if (out.size() >= max) break;
             AppEntry e = s.byPackage.get(p);
             if (e != null && usedPkgs.add(e.packageName)) out.add(e);
         }
         for (AppEntry e : s.apps) {
-            if (out.size() >= APP_TILES) break;
+            if (out.size() >= max) break;
             if (neverDefault(e.packageName)) continue;
             if (usedPkgs.add(e.packageName)) out.add(e);
         }
         return out;
     }
 
-    private void bindTiles() {
-        AppRepository.Snapshot s = snapshot;
-        if (s == null) return;
-        List<AppEntry> defaults = computeDefaults(s);
-        for (int i = 0; i < APP_TILES; i++) {
-            AppEntry e = null;
+    /**
+     * Resolves what every slot shows, never putting an app on the home screen twice:
+     * 1. the user's assignments (skipping uninstalled apps and repeats),
+     * 2. each remaining slot's own default, if that app is not already placed,
+     * 3. anything still empty takes the next default that is not placed.
+     */
+    private void resolveSlots(AppRepository.Snapshot s, AppEntry[] out, boolean[] pinned) {
+        HashSet<String> usedKeys = new HashSet<>();
+        HashSet<String> usedPkgs = new HashSet<>();
+        for (int i = 0; i < APP_SLOTS; i++) {
+            out[i] = null;
+            pinned[i] = false;
             String saved = prefs.getString(KEY_TILE + i, null);
-            if (saved != null) e = s.byKey.get(saved); // null if uninstalled -> default below
-            if (e == null && i < defaults.size()) e = defaults.get(i);
-            tileEntries[i] = e;
-            tiles[i].bind(e);
+            AppEntry e = saved == null ? null : s.byKey.get(saved);
+            if (e != null && usedKeys.add(e.key)) {
+                usedPkgs.add(e.packageName);
+                out[i] = e;
+                pinned[i] = true;
+            }
+        }
+        List<AppEntry> candidates = defaultCandidates(s);
+        for (int i = 0; i < APP_SLOTS && i < candidates.size(); i++) {
+            if (out[i] != null) continue;
+            AppEntry e = candidates.get(i);
+            if (!usedKeys.contains(e.key) && usedPkgs.add(e.packageName)) {
+                usedKeys.add(e.key);
+                out[i] = e;
+            }
+        }
+        int next = 0;
+        for (int i = 0; i < APP_SLOTS; i++) {
+            if (out[i] != null) continue;
+            while (next < candidates.size()) {
+                AppEntry e = candidates.get(next++);
+                if (!usedKeys.contains(e.key) && usedPkgs.add(e.packageName)) {
+                    usedKeys.add(e.key);
+                    out[i] = e;
+                    break;
+                }
+            }
         }
     }
 
-    private void onTileClick(int index) {
-        if (index == ALL_APPS_TILE) {
-            openDrawer();
-            return;
+    private void bindTiles() {
+        AppRepository.Snapshot s = snapshot;
+        if (s == null) return;
+        resolveSlots(s, tileEntries, tilePinned);
+        for (int i = 0; i < APP_SLOTS; i++) {
+            // "+" only once loading has finished, so slots do not flash it during start-up.
+            tiles[i].setEmptyLabel(tileEntries[i] == null && s.complete ? "Add app" : null);
+            tiles[i].bind(tileEntries[i]);
         }
+    }
+
+    /** Home slot showing this app, or -1. */
+    private int slotOf(AppEntry e) {
+        if (e == null) return -1;
+        for (int i = 0; i < APP_SLOTS; i++) {
+            AppEntry t = tileEntries[i];
+            if (t != null && t.key.equals(e.key)) return i;
+        }
+        return -1;
+    }
+
+    /** Stores slot i (the slot's own default is stored as "no assignment"). */
+    private static void putSlot(SharedPreferences.Editor ed, List<AppEntry> candidates, int i, AppEntry e) {
+        AppEntry def = i < candidates.size() ? candidates.get(i) : null;
+        if (e == null || (def != null && def.key.equals(e.key))) ed.remove(KEY_TILE + i);
+        else ed.putString(KEY_TILE + i, e.key);
+    }
+
+    private void applySlots(SharedPreferences.Editor ed) {
+        ed.apply(); // in-memory immediately; written to disk in the background
+        repo.setPriorityPackages(priorityPackages());
+        bindTiles();
+    }
+
+    /**
+     * Puts app into slot index. If the app is already on the home screen the two slots swap, so an
+     * app is never shown twice.
+     */
+    private void assignSlot(int index, AppEntry app) {
+        AppRepository.Snapshot s = snapshot;
+        if (s == null || app == null || index < 0 || index >= APP_SLOTS) return;
+        int other = slotOf(app);
+        if (other == index) return;
+        List<AppEntry> candidates = defaultCandidates(s);
+        SharedPreferences.Editor ed = prefs.edit();
+        if (other >= 0) putSlot(ed, candidates, other, tileEntries[index]);
+        putSlot(ed, candidates, index, app);
+        applySlots(ed);
+    }
+
+    private boolean packageOnHome(String pkg) {
+        for (int i = 0; i < APP_SLOTS; i++) {
+            AppEntry t = tileEntries[i];
+            if (t != null && t.packageName.equals(pkg)) return true;
+        }
+        return false;
+    }
+
+    /** What "Remove from home" would put into the slot: its default, or the next default not on home. */
+    private AppEntry replacementFor(AppRepository.Snapshot s, int index) {
+        List<AppEntry> candidates = defaultCandidates(s);
+        if (index < candidates.size() && !packageOnHome(candidates.get(index).packageName)) {
+            return candidates.get(index);
+        }
+        for (AppEntry e : candidates) {
+            if (!packageOnHome(e.packageName)) return e;
+        }
+        return null;
+    }
+
+    private void removeFromHome(int index) {
+        AppRepository.Snapshot s = snapshot;
+        if (s == null || index < 0 || index >= APP_SLOTS) return;
+        SharedPreferences.Editor ed = prefs.edit();
+        putSlot(ed, defaultCandidates(s), index, replacementFor(s, index));
+        applySlots(ed);
+    }
+
+    private void onTileClick(int index) {
         AppEntry e = tileEntries[index];
         if (e == null) {
-            showTileChooser(index); // empty tile: let the user pick one
+            showTileMenu(index); // empty slot: let the user pick an app
             return;
         }
         launch(e.component);
     }
 
-    private void showTileChooser(final int index) {
+    // ------------------------------------------------------------------------------------------ sheets
+
+    /** Long-press on a home slot: remove it from home, or choose another app for the slot. */
+    private void showTileMenu(final int index) {
         final AppRepository.Snapshot s = snapshot;
         if (s == null || s.apps.isEmpty()) {
             toast("Apps are still loading");
             return;
         }
-        List<AppEntry> defaults = computeDefaults(s);
-        AppEntry def = index < defaults.size() ? defaults.get(index) : null;
-        final String resetLabel = def != null ? "Reset to default (" + def.label + ")" : "Reset to default";
-        final List<AppEntry> apps = s.apps;
-        final float textSize = dp(20);
-        final int rowHeight = dp(64);
-
-        BaseAdapter adapter = new BaseAdapter() {
-            @Override
-            public int getCount() {
-                return apps.size() + 1;
+        final AppEntry current = tileEntries[index];
+        ArrayList<Sheet.Row> rows = new ArrayList<>(s.apps.size());
+        for (final AppEntry e : s.apps) {
+            Sheet.Row r = new Sheet.Row(e.label, () -> assignSlot(index, e));
+            r.icon = e.gridIcon;
+            r.iconSlot = true;
+            if (current != null && current.key.equals(e.key)) {
+                r.note = "This slot";
+                r.enabled = false;
+            } else if (slotOf(e) >= 0) {
+                r.note = "On home"; // choosing it swaps the two slots
             }
+            rows.add(r);
+        }
+        final int columns = 2;
+        GridView grid = Sheet.rows(this, rows, columns, this::pick);
 
-            @Override
-            public Object getItem(int position) {
-                return position == 0 ? null : apps.get(position - 1);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        int extra = 0;
+        if (current != null && tilePinned[index]) {
+            AppEntry back = replacementFor(s, index);
+            Sheet.Row remove = new Sheet.Row("Remove from home", null);
+            remove.remove = true;
+            remove.color = Ui.ACCENT;
+            if (back != null) {
+                List<AppEntry> candidates = defaultCandidates(s);
+                boolean ownDefault = index < candidates.size() && candidates.get(index).key.equals(back.key);
+                remove.note = ownDefault ? "Back to " + back.label : back.label + " instead";
             }
+            RowView rv = new RowView(this);
+            rv.bind(remove);
+            rv.setOnClickListener(v -> {
+                dismissDialog();
+                removeFromHome(index);
+            });
+            int rowH = dp(RowView.HEIGHT);
+            int gap = dp(8);
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, rowH);
+            rlp.bottomMargin = gap;
+            body.addView(rv, rlp);
+            extra = rowH + gap;
+        }
+        int gridHeight = listHeight(rows.size(), columns, extra);
+        body.addView(grid, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, gridHeight));
 
-            @Override
-            public long getItemId(int position) {
-                return position;
-            }
-
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                RowView row;
-                if (convertView instanceof RowView) {
-                    row = (RowView) convertView;
-                } else {
-                    row = new RowView(HomeActivity.this, textSize);
-                    row.setLayoutParams(new AbsListView.LayoutParams(AbsListView.LayoutParams.MATCH_PARENT, rowHeight));
-                }
-                if (position == 0) {
-                    row.bind(null, true, resetLabel, Ui.ACCENT);
-                } else {
-                    AppEntry e = apps.get(position - 1);
-                    row.bind(e.gridIcon, true, e.label, Ui.TEXT);
-                }
-                return row;
-            }
-        };
-
-        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
-                .setTitle("Choose app for this tile")
-                .setAdapter(adapter, (dlg, which) -> {
-                    String key = KEY_TILE + index;
-                    if (which == 0) {
-                        prefs.edit().remove(key).apply();
-                    } else if (which - 1 < apps.size()) {
-                        prefs.edit().putString(key, apps.get(which - 1).key).apply();
-                    }
-                    repo.setPriorityPackages(priorityPackages());
-                    bindTiles();
-                })
-                .create();
-        showDialog(d);
+        String title = current != null ? current.label : "Empty slot";
+        showDialog(Sheet.create(this, current != null ? current.gridIcon : null, title,
+                "Choose the app for this home slot", body, gridHeight + extra), dp(960));
     }
 
-    // ------------------------------------------------------------------------------------------ escape hatch
+    /** Long-press on an app in the drawer. */
+    @Override
+    public void onDrawerMenu(final AppEntry e) {
+        if (e == null) return;
+        ArrayList<Sheet.Row> rows = new ArrayList<>(3);
+        final int slot = slotOf(e);
+        if (slot >= 0) {
+            Sheet.Row on = new Sheet.Row("On home screen", null);
+            on.check = true;
+            on.enabled = false;
+            on.color = Ui.TEXT2;
+            rows.add(on);
+            if (tilePinned[slot]) {
+                rows.add(new Sheet.Row("Remove from home", () -> {
+                    removeFromHome(slot);
+                    closeDrawer(); // the home screen itself confirms the change
+                }));
+            }
+        } else {
+            rows.add(new Sheet.Row("Pin to home screen", () -> showPinChooser(e)));
+        }
+        rows.add(new Sheet.Row("App info", () -> openAppInfo(e)));
+        showMenu(e.gridIcon, e.label, null, rows);
+    }
+
+    /** "Pin to home screen": the dock is shown as it is on the home screen; tap the slot to use. */
+    private void showPinChooser(final AppEntry app) {
+        if (snapshot == null) return;
+        if (slotOf(app) >= 0) {
+            toast(app.label + " is already on home");
+            return;
+        }
+        boolean hasEmpty = false;
+        TileGrid strip = new TileGrid(this, 0);
+        strip.setGrid(APP_SLOTS, 1);
+        strip.setBackground(Ui.card(this));
+        for (int i = 0; i < APP_SLOTS; i++) {
+            AppCellView cell = newSlotCell(Ui.BUTTON_PRESSED);
+            if (tileEntries[i] == null) {
+                hasEmpty = true;
+                cell.setEmptyLabel("Empty");
+            }
+            cell.bind(tileEntries[i]);
+            final int index = i;
+            cell.setOnClickListener(v -> {
+                dismissDialog();
+                assignSlot(index, app);
+                closeDrawer(); // the home screen itself confirms the change
+            });
+            strip.addView(cell);
+        }
+        String hint = hasEmpty ? "Tap an empty slot, or the app to replace" : "Tap the app to replace";
+        showDialog(Sheet.create(this, app.gridIcon, "Pin " + app.label + " to home", hint, strip, dp(128)),
+                dp(APP_SLOTS * 138 + 24));
+    }
 
     private void showSystemMenu() {
-        final String[] items = {"Original launcher", "Choose home app", "Android settings",
-                "Check for updates (v" + Updater.get(this).currentVersion() + ")"};
-        final float textSize = dp(20);
-        final int rowHeight = dp(64);
-        BaseAdapter adapter = new BaseAdapter() {
-            @Override
-            public int getCount() {
-                return items.length;
-            }
+        ArrayList<Sheet.Row> rows = new ArrayList<>(4);
+        rows.add(new Sheet.Row("Original launcher", this::openOriginalLauncher));
+        rows.add(new Sheet.Row("Choose home app", this::openHomeSettings));
+        rows.add(new Sheet.Row("Android settings", this::openAndroidSettings));
+        Sheet.Row update = new Sheet.Row("Check for updates", () -> {
+            toast("Checking for updates…");
+            Updater.get(this).checkNow();
+        });
+        update.note = "v" + Updater.get(this).currentVersion();
+        rows.add(update);
+        // The gauge belongs on the driver's side of the screen (left- or right-hand drive).
+        final boolean right = prefs.getBoolean(KEY_GAUGE_RIGHT, false);
+        rows.add(new Sheet.Row(right ? "Move speed to the left" : "Move speed to the right", () -> {
+            prefs.edit().putBoolean(KEY_GAUGE_RIGHT, !right).apply();
+            home.setGaugeRight(!right);
+        }));
+        showMenu(null, "DriveHome", null, rows);
+    }
 
-            @Override
-            public Object getItem(int position) {
-                return items[position];
-            }
+    private void showMenu(Bitmap icon, String title, String subtitle, List<Sheet.Row> rows) {
+        GridView list = Sheet.rows(this, rows, 1, this::pick);
+        int height = listHeight(rows.size(), 1, 0);
+        showDialog(Sheet.create(this, icon, title, subtitle, list, height), dp(600));
+    }
 
-            @Override
-            public long getItemId(int position) {
-                return position;
-            }
+    private void pick(Sheet.Row row) {
+        dismissDialog();
+        if (row.action != null) row.action.run();
+    }
 
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                RowView row;
-                if (convertView instanceof RowView) {
-                    row = (RowView) convertView;
-                } else {
-                    row = new RowView(HomeActivity.this, textSize);
-                    row.setLayoutParams(new AbsListView.LayoutParams(AbsListView.LayoutParams.MATCH_PARENT, rowHeight));
-                }
-                row.bind(null, false, items[position], Ui.TEXT);
-                return row;
-            }
-        };
-        AlertDialog d = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog)
-                .setTitle("DriveHome")
-                .setAdapter(adapter, (dlg, which) -> {
-                    if (which == 0) openOriginalLauncher();
-                    else if (which == 1) openHomeSettings();
-                    else if (which == 2) openAndroidSettings();
-                    else {
-                        toast("Checking for updates…");
-                        Updater.get(this).checkNow();
-                    }
-                })
-                .create();
-        showDialog(d);
+    /**
+     * Height for a row list inside a sheet: all rows if they fit the screen, otherwise a whole
+     * number of rows plus half a row (the cut-off row shows that the list scrolls).
+     */
+    private int listHeight(int count, int columns, int extra) {
+        int rowH = dp(RowView.HEIGHT);
+        int lines = (count + columns - 1) / columns;
+        int screen = home != null && home.getHeight() > 0 ? home.getHeight()
+                : getResources().getDisplayMetrics().heightPixels - dp(116);
+        // Screen minus a margin, the sheet header (close button + padding) and the body's bottom margin.
+        int avail = screen - dp(24) - dp(Ui.TOUCH + 24) - dp(12) - extra;
+        if (lines * rowH <= avail) return lines * rowH;
+        int whole = Math.max(1, (avail - rowH / 2) / rowH);
+        return whole * rowH + rowH / 2;
     }
 
     private void openOriginalLauncher() {
@@ -700,25 +799,27 @@ public class HomeActivity extends Activity
         if (!tryStart(i)) toast("Settings not available");
     }
 
-    // ------------------------------------------------------------------------------------------ dialogs
+    private void openAppInfo(AppEntry e) {
+        Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", e.packageName, null));
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (!tryStart(i)) toast("Can't open app info");
+    }
 
-    private void showDialog(AlertDialog d) {
+    /** Shows a sheet: no open/close animation, no dim layer, no shadow; only one at a time. */
+    private void showDialog(Dialog d, int width) {
         dismissDialog();
         if (isFinishing() || isDestroyed()) return;
         try {
             Window w = d.getWindow();
             if (w != null) {
-                w.setWindowAnimations(0);                                // no open/close animation
-                w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); // no (animated) dim layer
+                w.setWindowAnimations(0);
+                w.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                w.setDimAmount(0f);
+                w.setElevation(0f);
                 w.setBackgroundDrawable(Ui.rounded(Ui.DIALOG, dp(Ui.RADIUS), Ui.DIALOG_STROKE, Math.max(1, dp(1))));
-            }
-            ListView lv = d.getListView();
-            if (lv != null) {
-                lv.setSelector(new ColorDrawable(Color.TRANSPARENT)); // no ripple
-                lv.setDivider(null);
-                lv.setOverScrollMode(View.OVER_SCROLL_NEVER);
-                lv.setVerticalFadingEdgeEnabled(false);
-                lv.setScrollbarFadingEnabled(false);
+                int max = home != null && home.getWidth() > 0 ? home.getWidth() - dp(32) : width;
+                w.setLayout(Math.max(dp(240), Math.min(width, max)), ViewGroup.LayoutParams.WRAP_CONTENT);
             }
             d.setOnDismissListener((DialogInterface di) -> {
                 if (dialog == di) dialog = null;
@@ -753,28 +854,20 @@ public class HomeActivity extends Activity
         if (isDrawerOpen()) return;
         dismissDialog();
         drawer.setVisibility(View.VISIBLE);
-        content.setVisibility(View.INVISIBLE); // keeps its layout, but is not drawn under the drawer
+        home.setVisibility(View.INVISIBLE); // keeps its layout, but is not drawn under the drawer
     }
 
     private void closeDrawer() {
         closeDrawerWhenHidden = false;
         if (!isDrawerOpen()) return;
         drawer.setVisibility(View.GONE);
-        content.setVisibility(View.VISIBLE);
+        home.setVisibility(View.VISIBLE);
         drawer.scrollToTop();
     }
 
     @Override
     public void onDrawerLaunch(AppEntry e) {
         if (launch(e.component)) closeDrawerWhenHidden = true;
-    }
-
-    @Override
-    public void onDrawerDetails(AppEntry e) {
-        Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.fromParts("package", e.packageName, null));
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (!tryStart(i)) toast("Can't open app info");
     }
 
     @Override

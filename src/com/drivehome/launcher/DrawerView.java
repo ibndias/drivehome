@@ -18,13 +18,15 @@ import java.util.List;
 /**
  * Full-screen app drawer overlay (toggled with setVisibility by the activity, no animation).
  * Draws no background of its own: the activity hides the home content while it is shown, so the
- * window background shows through with no overdraw.
+ * window background shows through with no overdraw. Tap = launch, long-press = app menu
+ * (pin to home / app info).
  */
 final class DrawerView extends LinearLayout {
     interface Host {
         void onDrawerLaunch(AppEntry e);
 
-        void onDrawerDetails(AppEntry e);
+        /** Long-press on an app. */
+        void onDrawerMenu(AppEntry e);
 
         void onDrawerSettings();
 
@@ -43,46 +45,49 @@ final class DrawerView extends LinearLayout {
         super(c);
         setOrientation(VERTICAL);
         int pad = Ui.dp(c, 16);
-        setPadding(pad, pad, pad, pad);
-        cellHeight = Ui.dp(c, 140);
+        setPadding(pad, pad, pad, 0);
+        cellHeight = Ui.dp(c, 132);
         iconSize = Ui.dp(c, 64);
-        textSize = Ui.dp(c, 16);
+        textSize = Ui.dp(c, Ui.T_LABEL);
         cellRadius = Ui.dp(c, Ui.RADIUS);
+        int barHeight = Ui.dp(c, Ui.TOUCH);
 
         LinearLayout header = new LinearLayout(c);
         header.setOrientation(HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView title = Ui.text(c, Ui.dp(c, 30), Ui.TEXT, Ui.medium());
+        TextView title = Ui.text(c, Ui.dp(c, Ui.T_TITLE), Ui.TEXT, Ui.medium());
         title.setText("All apps");
         LayoutParams tlp = new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-        tlp.setMarginStart(Ui.dp(c, 8));
+        tlp.setMarginStart(Ui.dp(c, 12));
         header.addView(title, tlp);
 
-        TextView settings = Ui.text(c, Ui.dp(c, 20), Ui.TEXT, Ui.medium());
+        TextView settings = Ui.text(c, Ui.dp(c, Ui.T_BODY), Ui.TEXT, Ui.regular());
         settings.setText("Settings");
         settings.setGravity(Gravity.CENTER);
-        int sp = Ui.dp(c, 28);
+        int sp = Ui.dp(c, 36);
         settings.setPadding(sp, 0, sp, 0);
-        settings.setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, cellRadius));
+        settings.setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, barHeight / 2f));
         settings.setOnClickListener(v -> host.onDrawerSettings());
         header.addView(settings, new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT));
 
-        GlyphView close = new GlyphView(c, GlyphView.CLOSE, Ui.dp(c, 30), Ui.TEXT);
-        close.setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, cellRadius));
+        GlyphView close = new GlyphView(c, GlyphView.CLOSE, Ui.dp(c, 28), Ui.TEXT);
+        close.setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, barHeight / 2f));
         close.setContentDescription("Close");
         close.setOnClickListener(v -> host.onDrawerClose());
-        LayoutParams clp = new LayoutParams(Ui.dp(c, 104), LayoutParams.MATCH_PARENT);
+        LayoutParams clp = new LayoutParams(Ui.dp(c, 112), LayoutParams.MATCH_PARENT);
         clp.setMarginStart(Ui.dp(c, 12));
         header.addView(close, clp);
 
-        addView(header, new LayoutParams(LayoutParams.MATCH_PARENT, Ui.dp(c, 68)));
+        addView(header, new LayoutParams(LayoutParams.MATCH_PARENT, barHeight));
 
         grid = new GridView(c);
         grid.setNumColumns(8);
         grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
         grid.setHorizontalSpacing(Ui.dp(c, 8));
-        grid.setVerticalSpacing(Ui.dp(c, 8));
+        grid.setVerticalSpacing(Ui.dp(c, 4));
+        grid.setPadding(0, 0, 0, pad);
+        grid.setClipToPadding(false);
         grid.setSelector(new ColorDrawable(Color.TRANSPARENT)); // no ripple; cells draw their own pressed state
         grid.setDrawSelectorOnTop(false);
         grid.setCacheColorHint(Color.TRANSPARENT);
@@ -98,7 +103,7 @@ final class DrawerView extends LinearLayout {
         });
         grid.setOnItemLongClickListener((parent, view, position, id) -> {
             AppEntry e = item(position);
-            if (e != null) host.onDrawerDetails(e);
+            if (e != null) host.onDrawerMenu(e);
             return true;
         });
         LayoutParams glp = new LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f);

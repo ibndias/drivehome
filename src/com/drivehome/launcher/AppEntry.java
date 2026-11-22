@@ -11,9 +11,9 @@ final class AppEntry {
     final String packageName;
     final String label;
 
-    /** Pre-scaled to the home tile icon size. Written on the loader thread, read on main. */
+    /** Pre-scaled to 72dp (now-playing card). Written on the loader thread, read on main. */
     volatile Bitmap tileIcon;
-    /** Pre-scaled to the drawer / list icon size. */
+    /** Pre-scaled to 64dp (dock, drawer, sheets). */
     volatile Bitmap gridIcon;
 
     AppEntry(ComponentName component, String key, String label) {

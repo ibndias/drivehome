@@ -5,6 +5,9 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Rect;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
@@ -13,11 +16,10 @@ import android.media.session.PlaybackState;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.view.Gravity;
+import android.text.TextPaint;
+import android.text.TextUtils;
 import android.view.KeyEvent;
-import android.widget.LinearLayout;
-import android.widget.Space;
-import android.widget.TextView;
+import android.view.ViewGroup;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -27,8 +29,12 @@ import java.util.List;
  * "Now playing" card. Owns all media-session logic: active sessions (needs the notification-listener
  * grant; without it everything degrades to a placeholder + media key events), per-controller callbacks
  * while the activity is resumed, and transport buttons.
+ *
+ * View side: one flat ViewGroup with four children (app icon + three large transport buttons). Title
+ * and artist are drawn directly (pre-ellipsized), so a track change is a single invalidate - no
+ * TextView, no layout pass.
  */
-final class MediaCard extends LinearLayout {
+final class MediaCard extends ViewGroup {
     interface Host {
         /** Open the player app (pkg may be null), else its session activity, else the Music app. */
         void openPlayer(String pkg, PendingIntent sessionActivity);
@@ -40,12 +46,31 @@ final class MediaCard extends LinearLayout {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ComponentName listenerComponent;
     private final GlyphView icon;
-    private final TextView title;
-    private final TextView subtitle;
+    private final GlyphView prevButton;
     private final GlyphView playButton;
+    private final GlyphView nextButton;
     private final ArrayList<Tracked> tracked = new ArrayList<>();
     /** Labels of session owners that are not launchable apps (e.g. the Bluetooth audio sink). */
     private final HashMap<String, String> labelCache = new HashMap<>();
+
+    // Drawing state (all allocated once).
+    private final TextPaint titlePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+    private final TextPaint subtitlePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+    private final float titleHeight;
+    private final float subtitleHeight;
+    private final int pad;
+    private final int iconSize;
+    private final int iconGap;
+    private final int lineGap;
+    private final int buttonGap;
+    private final int buttonHeight;
+    private String title = "";
+    private String subtitle = "";
+    private String shownTitle = "";
+    private String shownSubtitle = "";
+    private int textLeft;
+    private float titleBaseline;
+    private float subtitleBaseline;
 
     private MediaSessionManager sessionManager;
     private boolean started;
@@ -104,62 +129,134 @@ final class MediaCard extends LinearLayout {
         super(c);
         this.host = host;
         listenerComponent = new ComponentName(c, MediaListener.class);
-        setOrientation(VERTICAL);
-        int pad = Ui.dp(c, 20);
-        setPadding(pad, pad, pad, pad);
-        setBackground(Ui.pressable(Ui.CARD, Ui.CARD_PRESSED, Ui.dp(c, Ui.RADIUS)));
+        pad = Ui.dp(c, 28);
+        iconSize = Ui.dp(c, 72);
+        iconGap = Ui.dp(c, 20);
+        lineGap = Ui.dp(c, 16);
+        buttonGap = Ui.dp(c, 12);
+        buttonHeight = Ui.dp(c, 96);
+
+        titlePaint.setTextSize(Ui.dp(c, Ui.T_TITLE));
+        titlePaint.setTypeface(Ui.medium());
+        titlePaint.setColor(Ui.TEXT);
+        subtitlePaint.setTextSize(Ui.dp(c, Ui.T_BODY));
+        subtitlePaint.setTypeface(Ui.regular());
+        subtitlePaint.setColor(Ui.TEXT2);
+        Rect r = new Rect();
+        titlePaint.getTextBounds("H", 0, 1, r);
+        titleHeight = r.height();
+        subtitlePaint.getTextBounds("H", 0, 1, r);
+        subtitleHeight = r.height();
+
+        setWillNotDraw(false);
+        setBackground(Ui.pressableCardWithControls(c));
         setOnClickListener(v -> openPlayer());
 
-        LinearLayout info = new LinearLayout(c);
-        info.setOrientation(HORIZONTAL);
-        info.setGravity(Gravity.CENTER_VERTICAL);
-        icon = new GlyphView(c, GlyphView.NOTE, Ui.dp(c, 32), Ui.ACCENT);
-        icon.setPlate(Ui.BUTTON, Ui.dp(c, 14));
-        int iconSize = Ui.dp(c, 64);
-        info.addView(icon, new LayoutParams(iconSize, iconSize));
+        icon = new GlyphView(c, GlyphView.NOTE, Ui.dp(c, 36), Ui.ACCENT);
+        icon.setPlate(Ui.BUTTON, Ui.dp(c, 18));
+        addView(icon);
 
-        LinearLayout texts = new LinearLayout(c);
-        texts.setOrientation(VERTICAL);
-        title = Ui.text(c, Ui.dp(c, 23), Ui.TEXT, Ui.medium());
-        subtitle = Ui.text(c, Ui.dp(c, 17), Ui.TEXT2, Ui.regular());
-        texts.addView(title, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-        LayoutParams slp = new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        slp.topMargin = Ui.dp(c, 7);
-        texts.addView(subtitle, slp);
-        LayoutParams tlp = new LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-        tlp.setMarginStart(Ui.dp(c, 16));
-        info.addView(texts, tlp);
-        addView(info, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
-
-        addView(new Space(c), new LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f));
-
-        LinearLayout buttons = new LinearLayout(c);
-        buttons.setOrientation(HORIZONTAL);
-        GlyphView prev = button(c, GlyphView.PREV, Ui.BUTTON, Ui.BUTTON_PRESSED, Ui.TEXT, 30, "Previous");
-        playButton = button(c, GlyphView.PLAY_PAUSE, Ui.ACCENT, Ui.ACCENT_PRESSED, Ui.WHITE, 34, "Play or pause");
-        GlyphView next = button(c, GlyphView.NEXT, Ui.BUTTON, Ui.BUTTON_PRESSED, Ui.TEXT, 30, "Next");
-        prev.setOnClickListener(v -> skip(false));
+        prevButton = button(c, GlyphView.PREV, Ui.BUTTON, Ui.BUTTON_PRESSED, Ui.TEXT, 36, "Previous");
+        playButton = button(c, GlyphView.PLAY_PAUSE, Ui.BUTTON_HI, Ui.BUTTON_HI_PRESSED, Ui.WHITE, 44, "Play or pause");
+        nextButton = button(c, GlyphView.NEXT, Ui.BUTTON, Ui.BUTTON_PRESSED, Ui.TEXT, 36, "Next");
+        prevButton.setOnClickListener(v -> skip(false));
         playButton.setOnClickListener(v -> playPause());
-        next.setOnClickListener(v -> skip(true));
-        int gap = Ui.dp(c, 12);
-        buttons.addView(prev, new LayoutParams(0, LayoutParams.MATCH_PARENT, 1f));
-        LayoutParams plp = new LayoutParams(0, LayoutParams.MATCH_PARENT, 1f);
-        plp.setMarginStart(gap);
-        buttons.addView(playButton, plp);
-        LayoutParams nlp = new LayoutParams(0, LayoutParams.MATCH_PARENT, 1f);
-        nlp.setMarginStart(gap);
-        buttons.addView(next, nlp);
-        addView(buttons, new LayoutParams(LayoutParams.MATCH_PARENT, Ui.dp(c, 76)));
+        nextButton.setOnClickListener(v -> skip(true));
+        addView(prevButton);
+        addView(playButton);
+        addView(nextButton);
 
         showPlaceholder();
     }
 
-    private static GlyphView button(Context c, int type, int normal, int pressed, int color, int glyphDp,
+    private GlyphView button(Context c, int type, int normal, int pressed, int color, int glyphDp,
             String description) {
         GlyphView g = new GlyphView(c, type, Ui.dp(c, glyphDp), color);
-        g.setBackground(Ui.pressable(normal, pressed, Ui.dp(c, 14)));
+        g.setBackground(Ui.pressable(normal, pressed, buttonHeight / 2f));
         g.setContentDescription(description);
         return g;
+    }
+
+    // ---------------------------------------------------------------- layout & drawing
+
+    /** Full height when the card is tall enough (always on the head unit); shrinks only in tiny layouts. */
+    private int buttonHeightFor(int h) {
+        int room = h - 2 * pad - iconSize - lineGap; // what is left under the title block
+        return Math.max(0, Math.min(buttonHeight, Math.max(room, h / 3)));
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int w = MeasureSpec.getSize(widthMeasureSpec);
+        int h = MeasureSpec.getSize(heightMeasureSpec);
+        int bh = buttonHeightFor(h);
+        int inner = Math.max(0, w - 2 * pad);
+        int bw = Math.max(0, (inner - 2 * buttonGap) / 3);
+        int bwSpec = MeasureSpec.makeMeasureSpec(bw, MeasureSpec.EXACTLY);
+        int bhSpec = MeasureSpec.makeMeasureSpec(Math.max(0, bh), MeasureSpec.EXACTLY);
+        prevButton.measure(bwSpec, bhSpec);
+        nextButton.measure(bwSpec, bhSpec);
+        // The middle button takes the rounding remainder so the row ends exactly on the padding.
+        playButton.measure(MeasureSpec.makeMeasureSpec(Math.max(0, inner - 2 * buttonGap - 2 * bw),
+                MeasureSpec.EXACTLY), bhSpec);
+        int iconSpec = MeasureSpec.makeMeasureSpec(iconSize, MeasureSpec.EXACTLY);
+        icon.measure(iconSpec, iconSpec);
+        setMeasuredDimension(w, h);
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        int w = r - l;
+        int h = b - t;
+        int bh = prevButton.getMeasuredHeight();
+        int top = h - pad - bh;
+        int x = pad;
+        prevButton.layout(x, top, x + prevButton.getMeasuredWidth(), top + bh);
+        x += prevButton.getMeasuredWidth() + buttonGap;
+        playButton.layout(x, top, x + playButton.getMeasuredWidth(), top + bh);
+        x += playButton.getMeasuredWidth() + buttonGap;
+        nextButton.layout(x, top, x + nextButton.getMeasuredWidth(), top + bh);
+
+        icon.layout(pad, pad, pad + iconSize, pad + iconSize);
+        textLeft = pad + iconSize + iconGap;
+        // Title + artist as one block, centred on the icon.
+        float block = titleHeight + lineGap + subtitleHeight;
+        titleBaseline = pad + iconSize / 2f - block / 2f + titleHeight;
+        subtitleBaseline = titleBaseline + lineGap + subtitleHeight;
+        fitTexts(w);
+    }
+
+    private void fitTexts(int w) {
+        float avail = w - textLeft - pad;
+        if (avail <= 0f) {
+            shownTitle = title;
+            shownSubtitle = subtitle;
+            return;
+        }
+        shownTitle = TextUtils.ellipsize(title, titlePaint, avail, TextUtils.TruncateAt.END).toString();
+        shownSubtitle = TextUtils.ellipsize(subtitle, subtitlePaint, avail, TextUtils.TruncateAt.END).toString();
+    }
+
+    private void setTexts(String t, String s) {
+        if (t == null) t = "";
+        if (s == null) s = "";
+        if (t.equals(title) && s.equals(subtitle)) return;
+        title = t;
+        subtitle = s;
+        setContentDescription(t + ", " + s);
+        fitTexts(getWidth());
+        invalidate();
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        canvas.drawText(shownTitle, textLeft, titleBaseline, titlePaint);
+        canvas.drawText(shownSubtitle, textLeft, subtitleBaseline, subtitlePaint);
+    }
+
+    @Override
+    public boolean shouldDelayChildPressedState() {
+        return false; // not scrollable: show pressed feedback immediately
     }
 
     // ---------------------------------------------------------------- lifecycle (called from onResume/onPause)
@@ -301,9 +398,8 @@ final class MediaCard extends LinearLayout {
             a = appLabel;
         }
         placeholderShown = false;
-        Ui.setText(title, t);
-        Ui.setText(subtitle, a);
-        icon.setBitmap(app != null ? app.gridIcon : null);
+        setTexts(t, a);
+        icon.setBitmap(app != null ? app.tileIcon : null);
         playButton.setType(isPlaying(st) ? GlyphView.PAUSE : GlyphView.PLAY);
     }
 
@@ -341,10 +437,9 @@ final class MediaCard extends LinearLayout {
 
     private void showPlaceholder() {
         placeholderShown = true;
-        Ui.setText(title, "Music");
-        Ui.setText(subtitle, "Tap to open");
+        setTexts("Music", "Tap to open");
         AppEntry m = lookup(MUSIC_PKG);
-        icon.setBitmap(m != null ? m.gridIcon : null);
+        icon.setBitmap(m != null ? m.tileIcon : null);
         playButton.setType(GlyphView.PLAY_PAUSE);
     }
 
