@@ -26,8 +26,8 @@
 param(
     [string]$ProjectDir = '',
     [string]$OutName = 'drivehome',
-    [int]$VersionCode = 1,
-    [string]$VersionName = '1.0',
+    [int]$VersionCode = 0,        # 0 = auto: number of git commits (same scheme locally and in CI)
+    [string]$VersionName = '',    # '' = auto: "1.<VersionCode>"
     [int]$MinSdk = 29,
     [int]$TargetSdk = 29,
     [string]$JavaRelease = '11',
@@ -203,6 +203,17 @@ try {
     $finalApk   = Join-Path $outDir "$OutName.apk"
 
     Write-Host "Project : $ProjectDir"
+    if ($VersionCode -le 0) {
+        $count = ''
+        try { $count = (& git -C $ProjectDir rev-list --count HEAD 2>$null | Select-Object -First 1) } catch { }
+        if ("$count" -match '^\d+$') { $VersionCode = [int]$count } else { $VersionCode = 1 }
+        # Uncommitted local builds get the *next* number so they install over the last release.
+        $dirty = ''
+        try { $dirty = (& git -C $ProjectDir status --porcelain --untracked-files=no 2>$null) -join '' } catch { }
+        if ($dirty) { $VersionCode += 1 }
+    }
+    if (-not $VersionName) { $VersionName = "1.$VersionCode" }
+
     Write-Host "JDK     : $JdkHome"
     Write-Host "SDK     : $SdkDir (build-tools $BuildToolsVersion, $Platform)"
     Write-Host "Version : code=$VersionCode name=$VersionName minSdk=$MinSdk targetSdk=$TargetSdk"
@@ -238,11 +249,9 @@ try {
         '--version-code', "$VersionCode",
         '--version-name', $VersionName,
         '--auto-add-overlay')
-    # Version values are only *defaults* for aapt2; force them when they were
-    # given explicitly so the command line wins over the manifest.
-    if ($PSBoundParameters.ContainsKey('VersionCode') -or $PSBoundParameters.ContainsKey('VersionName')) {
-        $linkArgs += '--replace-version'
-    }
+    # Version values are only *defaults* for aapt2; always force them so the
+    # computed/explicit version wins over whatever the manifest says.
+    $linkArgs += '--replace-version'
     if ($hasRes) { $linkArgs += $resZip }
     Invoke-Tool 'aapt2 link' $aapt2 $linkArgs
     Assert-Exists $baseApk 'Linked base APK'

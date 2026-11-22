@@ -1,0 +1,72 @@
+name: Build & release
+
+# Every push to main that touches the app builds a signed APK and publishes it as
+# GitHub Release "v<commit count>". DriveHome on the head unit polls the latest
+# release and offers a one-tap update.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tools/**'
+      - 'deploy.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history: versionCode = commit count
+
+      - name: Restore signing key
+        shell: pwsh
+        env:
+          KEYSTORE_B64: ${{ secrets.DRIVEHOME_KEYSTORE_B64 }}
+        run: |
+          if (-not $env:KEYSTORE_B64) { throw 'Missing repo secret DRIVEHOME_KEYSTORE_B64 (see README "Auto-update")' }
+          $p = Join-Path $env:RUNNER_TEMP 'drivehome-release.jks'
+          [IO.File]::WriteAllBytes($p, [Convert]::FromBase64String($env:KEYSTORE_B64))
+          Add-Content -Path $env:GITHUB_ENV -Value "DRIVEHOME_KEYSTORE=$p"
+
+      - name: Ensure SDK packages
+        shell: pwsh
+        run: |
+          $need = @()
+          if (-not (Test-Path "$env:ANDROID_HOME\build-tools\35.0.0\aapt2.exe")) { $need += '"build-tools;35.0.0"' }
+          if (-not (Test-Path "$env:ANDROID_HOME\platforms\android-35\android.jar")) { $need += '"platforms;android-35"' }
+          if ($need) {
+            $sm = Get-ChildItem "$env:ANDROID_HOME\cmdline-tools" -Recurse -Filter sdkmanager.bat | Select-Object -First 1
+            cmd /c "echo y| `"$($sm.FullName)`" $($need -join ' ')"
+          }
+
+      - name: Version
+        shell: pwsh
+        run: |
+          $vc = [int](git rev-list --count HEAD)
+          Add-Content -Path $env:GITHUB_ENV -Value "VC=$vc"
+
+      - name: Build
+        shell: powershell
+        env:
+          DRIVEHOME_STORE_PASS: ${{ secrets.DRIVEHOME_STORE_PASS }}
+        run: |
+          .\build.ps1 -JdkHome $env:JAVA_HOME_17_X64 -SdkDir $env:ANDROID_HOME -VersionCode $env:VC -VersionName "1.$env:VC"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $msg = (git log -1 --pretty=%s)
+          gh release create "v$env:VC" out/drivehome.apk --title "DriveHome v$env:VC" --notes "$msg`n`nCommit: $env:GITHUB_SHA" --latest
