@@ -1,0 +1,7 @@
+build/
+out/
+*.idsig
+*.raw.png
+screenshots/
+.vscode/
+.idea/
