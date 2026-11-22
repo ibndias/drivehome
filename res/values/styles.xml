@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="HomeTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/home_background</item>
+        <item name="android:windowShowWallpaper">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowContentTransitions">false</item>
+        <item name="android:windowActivityTransitions">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:statusBarColor">@color/bar_background</item>
+        <item name="android:navigationBarColor">@color/bar_background</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+</resources>

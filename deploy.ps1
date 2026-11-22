@@ -102,6 +102,8 @@ Step 'Granting permissions'
 AdbS shell pm grant $Pkg android.permission.ACCESS_FINE_LOCATION   | Out-Host
 AdbS shell pm grant $Pkg android.permission.ACCESS_COARSE_LOCATION | Out-Host
 AdbS shell cmd notification allow_listener $Listener              | Out-Host
+# Let DriveHome install its own updates from GitHub (Android still asks for a one-tap confirm).
+AdbS shell appops set $Pkg REQUEST_INSTALL_PACKAGES allow          | Out-Host
 
 if (-not $NoHome) {
     Step 'Setting DriveHome as the default home app'
