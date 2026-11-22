@@ -207,10 +207,8 @@ try {
         $count = ''
         try { $count = (& git -C $ProjectDir rev-list --count HEAD 2>$null | Select-Object -First 1) } catch { }
         if ("$count" -match '^\d+$') { $VersionCode = [int]$count } else { $VersionCode = 1 }
-        # Uncommitted local builds get the *next* number so they install over the last release.
-        $dirty = ''
-        try { $dirty = (& git -C $ProjectDir status --porcelain --untracked-files=no 2>$null) -join '' } catch { }
-        if ($dirty) { $VersionCode += 1 }
+        # Uncommitted local builds keep the same number as the last commit: `adb install -r` accepts an
+        # equal versionCode, and the next commit's CI release (count+1) is then offered as an update.
     }
     if (-not $VersionName) { $VersionName = "1.$VersionCode" }
 

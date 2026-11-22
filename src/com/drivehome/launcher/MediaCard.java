@@ -43,7 +43,7 @@ final class MediaCard extends LinearLayout {
     private final TextView title;
     private final TextView subtitle;
     private final GlyphView playButton;
-    private final ArrayList<MediaController> controllers = new ArrayList<>();
+    private final ArrayList<Tracked> tracked = new ArrayList<>();
     /** Labels of session owners that are not launchable apps (e.g. the Bluetooth audio sink). */
     private final HashMap<String, String> labelCache = new HashMap<>();
 
@@ -61,14 +61,36 @@ final class MediaCard extends LinearLayout {
                 }
             };
 
-    private final MediaController.Callback callback = new MediaController.Callback() {
+    /**
+     * One callback per session. Keeps the latest state/metadata the callbacks deliver, so a
+     * playback tick never costs extra binder calls (getPlaybackState/getMetadata carry album art)
+     * on the main thread. The session is only queried directly when the session list changes.
+     */
+    private final class Tracked extends MediaController.Callback {
+        final MediaController controller;
+        String pkg;
+        PlaybackState state;
+        MediaMetadata metadata;
+
+        Tracked(MediaController c) {
+            controller = c;
+            try {
+                pkg = c.getPackageName();
+                state = c.getPlaybackState();
+                metadata = c.getMetadata();
+            } catch (RuntimeException ignored) {
+            }
+        }
+
         @Override
-        public void onPlaybackStateChanged(PlaybackState state) {
+        public void onPlaybackStateChanged(PlaybackState s) {
+            state = s;
             if (started) refresh();
         }
 
         @Override
-        public void onMetadataChanged(MediaMetadata metadata) {
+        public void onMetadataChanged(MediaMetadata m) {
+            metadata = m;
             if (started) refresh();
         }
 
@@ -76,7 +98,7 @@ final class MediaCard extends LinearLayout {
         public void onSessionDestroyed() {
             if (started) requery();
         }
-    };
+    }
 
     MediaCard(Context c, Host host) {
         super(c);
@@ -196,13 +218,13 @@ final class MediaCard extends LinearLayout {
     }
 
     private void clearControllers() {
-        for (MediaController c : controllers) {
+        for (Tracked t : tracked) {
             try {
-                c.unregisterCallback(callback);
+                t.controller.unregisterCallback(t);
             } catch (RuntimeException ignored) {
             }
         }
-        controllers.clear();
+        tracked.clear();
     }
 
     private void setControllers(List<MediaController> list) {
@@ -210,9 +232,10 @@ final class MediaCard extends LinearLayout {
         if (list != null && started) {
             for (MediaController c : list) {
                 if (c == null) continue;
+                Tracked t = new Tracked(c);
                 try {
-                    c.registerCallback(callback, handler);
-                    controllers.add(c);
+                    c.registerCallback(t, handler);
+                    tracked.add(t);
                 } catch (RuntimeException ignored) {
                 }
             }
@@ -220,17 +243,19 @@ final class MediaCard extends LinearLayout {
         refresh();
     }
 
-    /** The playing session if any, else the highest-priority one. */
-    private MediaController activeController() {
-        MediaController first = null;
-        for (MediaController c : controllers) {
-            try {
-                if (isPlaying(c.getPlaybackState())) return c;
-            } catch (RuntimeException ignored) {
-            }
-            if (first == null) first = c;
+    /** The playing session if any, else the highest-priority one. No binder calls. */
+    private Tracked activeTracked() {
+        Tracked first = null;
+        for (Tracked t : tracked) {
+            if (isPlaying(t.state)) return t;
+            if (first == null) first = t;
         }
         return first;
+    }
+
+    private MediaController activeController() {
+        Tracked t = activeTracked();
+        return t == null ? null : t.controller;
     }
 
     private static boolean isPlaying(PlaybackState st) {
@@ -256,22 +281,14 @@ final class MediaCard extends LinearLayout {
     }
 
     private void refresh() {
-        MediaController c = activeController();
-        if (c == null) {
+        Tracked active = activeTracked();
+        if (active == null) {
             showPlaceholder();
             return;
         }
-        String pkg;
-        MediaMetadata md;
-        PlaybackState st;
-        try {
-            pkg = c.getPackageName();
-            md = c.getMetadata();
-            st = c.getPlaybackState();
-        } catch (RuntimeException e) {
-            showPlaceholder();
-            return;
-        }
+        String pkg = active.pkg;
+        MediaMetadata md = active.metadata;
+        PlaybackState st = active.state;
         AppEntry app = lookup(pkg);
         String appLabel = app != null ? app.label : labelFor(pkg);
         String t = firstNonEmpty(md, MediaMetadata.METADATA_KEY_TITLE, MediaMetadata.METADATA_KEY_DISPLAY_TITLE);

@@ -44,9 +44,11 @@ public final class InstallStatusReceiver extends BroadcastReceiver {
     }
 
     private static void bringHomeToFront(Context context) {
+        // setPackage, not setClass: an explicit component from a non-system caller is started as
+        // an ordinary activity, not as the home activity (Android 10 ActivityRecord rules).
         Intent home = new Intent(Intent.ACTION_MAIN)
                 .addCategory(Intent.CATEGORY_HOME)
-                .setClass(context, HomeActivity.class)
+                .setPackage(context.getPackageName())
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
             context.startActivity(home);

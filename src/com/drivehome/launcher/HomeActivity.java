@@ -166,6 +166,7 @@ public class HomeActivity extends Activity
         mediaCard.start();
         Updater updater = Updater.get(this);
         updater.setListener(this);
+        syncUpdateChip();
         updater.maybeCheck();
     }
 
@@ -182,9 +183,20 @@ public class HomeActivity extends Activity
 
     @Override
     public void onUpdateReady(int versionCode) {
+        syncUpdateChip();
+    }
+
+    /** Chip visible only while a verified, newer APK is actually on disk. */
+    private void syncUpdateChip() {
         if (updateChip == null) return;
-        updateChip.setText("Update v" + versionCode + " ready · tap to install");
-        updateChip.setVisibility(View.VISIBLE);
+        Updater u = Updater.get(this);
+        int ready = u.readyVersion();
+        if (ready > u.currentVersion()) {
+            updateChip.setText("Update v" + ready + " ready · tap to install");
+            updateChip.setVisibility(View.VISIBLE);
+        } else {
+            updateChip.setVisibility(View.GONE);
+        }
     }
 
     @Override
@@ -316,6 +328,9 @@ public class HomeActivity extends Activity
         updateChip.setSingleLine(true);
         updateChip.setVisibility(View.GONE);
         updateChip.setOnClickListener(v -> {
+            // Hide immediately: a double tap must not create two install sessions.
+            // onResume re-syncs it if the install was cancelled or failed.
+            v.setVisibility(View.GONE);
             toast("Installing update…");
             Updater.get(this).install();
         });
@@ -331,8 +346,12 @@ public class HomeActivity extends Activity
         row.setBaselineAligned(true);
         speedView = Ui.text(this, dp(44), Ui.TEXT, Ui.light());
         speedView.setText("--");
-        row.addView(speedView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        speedView.setSingleLine(true);
+        speedView.setGravity(android.view.Gravity.END);
+        // Fixed width (fits "188"): the 1 Hz speed text changes then only redraw this view
+        // instead of re-laying out the whole window while driving.
+        int speedWidth = (int) Math.ceil(speedView.getPaint().measureText("188")) + dp(2);
+        row.addView(speedView, new LinearLayout.LayoutParams(speedWidth, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView unit = Ui.text(this, dp(18), Ui.TEXT2, Ui.regular());
         unit.setText("km/h");
         LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
