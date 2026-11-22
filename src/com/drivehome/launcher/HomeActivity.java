@@ -142,6 +142,7 @@ public class HomeActivity extends Activity
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        migrateOldTiles();
         setContentView(buildUi());
         applyLayoutMode(getResources().getConfiguration());
         updateClock();
@@ -491,6 +492,30 @@ public class HomeActivity extends Activity
      * 2. each remaining slot's own default, if that app is not already placed,
      * 3. anything still empty takes the next default that is not placed.
      */
+    /**
+     * One-time: the pre-Cockpit layout had 11 app tiles (tile_0..tile_10); the dock has
+     * {@link #APP_SLOTS}. Move user picks from the dropped slots into free dock slots (no
+     * duplicates) and delete the old keys, so nothing reappears if the dock ever grows.
+     */
+    private void migrateOldTiles() {
+        if (prefs.getBoolean("slots_v2", false)) return;
+        SharedPreferences.Editor ed = prefs.edit();
+        HashSet<String> kept = new HashSet<>();
+        for (int i = 0; i < APP_SLOTS; i++) {
+            String v = prefs.getString(KEY_TILE + i, null);
+            if (v != null) kept.add(v);
+        }
+        int free = 0;
+        for (int k = APP_SLOTS; k < 11; k++) {
+            String v = prefs.getString(KEY_TILE + k, null);
+            ed.remove(KEY_TILE + k);
+            if (v == null || !kept.add(v)) continue;
+            while (free < APP_SLOTS && prefs.getString(KEY_TILE + free, null) != null) free++;
+            if (free < APP_SLOTS) ed.putString(KEY_TILE + free++, v);
+        }
+        ed.putBoolean("slots_v2", true).apply();
+    }
+
     private void resolveSlots(AppRepository.Snapshot s, AppEntry[] out, boolean[] pinned) {
         HashSet<String> usedKeys = new HashSet<>();
         HashSet<String> usedPkgs = new HashSet<>();
@@ -656,9 +681,12 @@ public class HomeActivity extends Activity
             }
             RowView rv = new RowView(this);
             rv.bind(remove);
+            final String currentKey = current.key;
             rv.setOnClickListener(v -> {
                 dismissDialog();
-                removeFromHome(index);
+                // Only if the slot still holds the app this menu was opened for.
+                AppEntry nowThere = tileEntries[index];
+                if (nowThere != null && currentKey.equals(nowThere.key) && tilePinned[index]) removeFromHome(index);
             });
             int rowH = dp(RowView.HEIGHT);
             int gap = dp(8);
@@ -689,7 +717,10 @@ public class HomeActivity extends Activity
             rows.add(on);
             if (tilePinned[slot]) {
                 rows.add(new Sheet.Row("Remove from home", () -> {
-                    removeFromHome(slot);
+                    // Re-resolve at tap time: a package change while the menu was open may
+                    // have moved apps between slots.
+                    int now = slotOf(e);
+                    if (now >= 0 && tilePinned[now]) removeFromHome(now);
                     closeDrawer(); // the home screen itself confirms the change
                 }));
             }
