@@ -9,6 +9,10 @@
     <!-- Self-update from GitHub Releases (see Updater.java). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Never draws overlays. Granted via appops at deploy only because it exempts us from
+         Android 10's background-activity-start block, so DriveHome can return to the front
+         after a self-update (the system falls back to another home while we're replaced). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:label="DriveHome"
@@ -48,9 +52,14 @@
             </intent-filter>
         </service>
 
-        <!-- PackageInstaller session results for self-updates (explicit PendingIntent only). -->
+        <!-- Self-update: PackageInstaller session results (explicit PendingIntent) and
+             MY_PACKAGE_REPLACED, to bring DriveHome back to the front after an update. -->
         <receiver
             android:name=".InstallStatusReceiver"
-            android:exported="false" />
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

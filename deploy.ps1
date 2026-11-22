@@ -104,6 +104,9 @@ AdbS shell pm grant $Pkg android.permission.ACCESS_COARSE_LOCATION | Out-Host
 AdbS shell cmd notification allow_listener $Listener              | Out-Host
 # Let DriveHome install its own updates from GitHub (Android still asks for a one-tap confirm).
 AdbS shell appops set $Pkg REQUEST_INSTALL_PACKAGES allow          | Out-Host
+# Exempts DriveHome from Android 10's background-activity-start block so it can come back to
+# the front after a self-update. It never draws overlays.
+AdbS shell appops set $Pkg SYSTEM_ALERT_WINDOW allow               | Out-Host
 
 if (-not $NoHome) {
     Step 'Setting DriveHome as the default home app'
